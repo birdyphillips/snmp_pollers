@@ -1,0 +1,17 @@
+[Unit]
+Description=Latency Management Upstream Metrics Poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lld_eft
+WorkingDirectory=/opt/latency_mgmt_poller
+ExecStart=/opt/latency_mgmt_poller/venv/bin/python poll_latency_mgmt_us.py
+Restart=on-failure
+RestartSec=10
+SyslogIdentifier=poll_latency_mgmt
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

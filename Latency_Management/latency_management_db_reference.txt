@@ -1,0 +1,127 @@
+latency_management DB — Quick Reference
+=======================================
+Live on 24.179.103.29:5432 | Populated every 300s | 1018 LLD modems | Elements API SNMP walk
+
+
+CONNECT
+-------
+Host     : 24.179.103.29
+Port     : 5432
+Database : latency_management
+Read/write : aarch_user / arch123
+DDL        : db_admin / lldaateam
+
+
+KEY TABLES
+----------
+lm_docs_qos_service_flow_metrics          Wide AQM metrics per SF per poll (main table)
+lm_docs_qos_sf_latency_histogram          16-bin latency histogram per SF
+lm_docs_qos_sf_latency_bin_pkts           Histogram in long format (bin_number, pkt_count)
+lm_docs_qos_sf_latency_max_latency        Max latency per SF
+lm_docs_qos_sf_latency_num_hist_updates   Hist update count + buffer size
+lm_docs_qos_sf_latency_bin_edge           Bin edge boundaries per SF
+lm_docs_qos_service_flow_pkts             Raw packet counter per SF
+lm_docs_qos_service_flow_octets           Raw octet counter per SF
+lm_docs_qos_service_flow_pkts_delta       Delta packets between polls
+lm_docs_qos_service_flow_octets_delta     Delta octets between polls
+lm_docs_qos_service_flow_dropped_delta    Delta AQM + policed drops between polls
+lm_docs_qos_service_flow_aqm_dropped_pkts Raw AQM dropped counter
+lm_docs_qos_sf_congestion_sanctioned_pkts Congestion sanctioned packets
+lm_docs_qos_sf_congestion_total_ect0_pkts ECT(0) marked packets
+lm_docs_qos_sf_congestion_total_ect1_pkts ECT(1) marked packets
+lm_docs_qos_sf_congestion_ce_marked_ect1_pkts  CE-marked ECT(1) packets
+lm_docs_qos_sf_congestion_arrived_ce_pkts Arrived CE packets
+lm_docs_qos_service_flow_sfid             SCN per SF per poll
+lm_docs_qos_service_flow_sfid_delta       SCN delta tracking
+lm_docs_qos_service_flow_time_created     SF creation timestamp
+lm_docs_qos_params                        QoS param key/value store per SF
+lm_qos_aggregate_service_flow_map         Aggregate SF ID mapping
+lm_docs_dev_event_table                   DOCSIS event log per modem
+lm_cm_devices                             Modem registry with last_seen timestamp
+
+Total: 24 hypertables, all lm_ prefixed
+
+
+DELTA CALCULATIONS
+------------------
+Deltas are computed in-memory between polls using _prev_counters dict keyed on (cm_mac_addr, sf_index).
+Negative values are skipped to handle SNMP counter resets.
+
+  lm_docs_qos_service_flow_pkts_delta    -- columns: pkts, raw_prev, raw_curr, delta
+  lm_docs_qos_service_flow_octets_delta  -- columns: octets, raw_prev, raw_curr, delta
+  lm_docs_qos_service_flow_dropped_delta -- columns: aqm_dropped_pkts, policed_drop_pkts,
+                                             raw_prev_aqm, raw_curr_aqm,
+                                             raw_prev_policed, raw_curr_policed,
+                                             delta_aqm, delta_policed
+
+Congestion counters (ect0, ect1, ce_marked, arrived_ce, sanctioned) are raw cumulative only.
+Use a window function to get deltas at query time:
+
+  SELECT timestamp, sf_index,
+         total_ect0_pkts
+           - LAG(total_ect0_pkts) OVER (PARTITION BY cm_mac_addr, sf_index ORDER BY timestamp)
+           AS ect0_delta
+  FROM lm_docs_qos_sf_congestion_total_ect0_pkts
+  WHERE cm_mac_addr = '10:36:aa:90:93:64'
+    AND timestamp > NOW() - INTERVAL '1 hour';
+
+
+SAMPLE QUERIES
+--------------
+
+Latest data for a modem:
+  SELECT * FROM lm_docs_qos_service_flow_metrics
+  WHERE cm_mac_addr = '10:36:aa:90:93:64'
+  ORDER BY timestamp DESC LIMIT 10;
+
+AQM drops across all modems right now:
+  SELECT cm_mac_addr, sf_index, service_class_name, aqm_dropped_pkts
+  FROM lm_docs_qos_service_flow_metrics
+  WHERE timestamp > NOW() - INTERVAL '10 minutes'
+    AND aqm_dropped_pkts > 0
+  ORDER BY aqm_dropped_pkts DESC;
+
+Histogram over time for a SF:
+  SELECT timestamp, bin1_pkts, bin2_pkts, bin3_pkts, bin4_pkts
+  FROM lm_docs_qos_sf_latency_histogram
+  WHERE cm_mac_addr = '10:36:aa:90:93:64'
+    AND sf_index = '18277'
+    AND timestamp > NOW() - INTERVAL '1 hour'
+  ORDER BY timestamp;
+
+Delta throughput for a modem:
+  SELECT timestamp, sf_index, delta, raw_curr
+  FROM lm_docs_qos_service_flow_octets_delta
+  WHERE cm_mac_addr = '10:36:aa:90:93:64'
+    AND timestamp > NOW() - INTERVAL '1 hour'
+  ORDER BY timestamp;
+
+Recent DOCSIS events for a modem:
+  SELECT timestamp, event_id, level, event_text
+  FROM lm_docs_dev_event_table
+  WHERE cm_mac_addr = '10:36:aa:90:93:64'
+  ORDER BY timestamp DESC LIMIT 20;
+
+Modems with no upstream flows polled today:
+  SELECT cm_mac_addr, last_seen
+  FROM lm_cm_devices
+  WHERE NOT EXISTS (
+      SELECT 1 FROM lm_docs_qos_service_flow_metrics m
+      WHERE m.cm_mac_addr = lm_cm_devices.cm_mac_addr
+        AND m.timestamp > NOW() - INTERVAL '24 hours'
+  )
+  ORDER BY last_seen DESC;
+
+
+NOTES
+-----
+- Always filter on timestamp — hypertable, full scans are slow
+- sf_index is TEXT, not INT
+- latency_bin_edge can be NULL on some SFs (CMTS returns SCN string instead of numeric value)
+- If recreating any table: use DROP TABLE ... CASCADE
+  Plain DROP TABLE leaves orphaned TimescaleDB chunks with the old schema,
+  causing InvalidTextRepresentation errors on INSERT
+- Modem list sourced from ipdr_data_for_histograms.public.ds_histograms_enabled_modems
+  on the same host, refreshed every 24h
+- Poller script: Elements_API/Latency_Management/poll_latency_mgmt_us.py
+- Table creation: Elements_API/Latency_Management/create_tables.sql

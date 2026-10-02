@@ -1,0 +1,18 @@
+.env
+__pycache__/
+*.pyc
+*.log
+*.log.*
+modem_list.txt
+modem_list_backup.txt
+modem_list_changes.txt
+results/
+# Raw poll data
+**/*.json
+**/*.csv
+**/*.pdf
+**/*.xlsx
+**/*.zip
+# API response captures
+api_response.txt
+vcmts_*.json
